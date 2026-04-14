@@ -1,0 +1,11 @@
+zig-cache/
+zig-out/
+.zig-cache/
+build/
+node_modules/
+public/app.js
+public/app.css
+public/index.html
+public/about.html
+.cache/
+._reference/

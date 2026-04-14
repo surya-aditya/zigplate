@@ -1,27 +1,24 @@
 const std = @import("std");
 const h = @import("html");
-const manifest = @import("manifest");
+const document = @import("document");
+const router = @import("router");
 const cms_mod = @import("cms");
 
 pub const CmsStore = cms_mod.Store;
 pub const Content = cms_mod.Content;
 
-// RenderCtx is the lookup table `h.writeTemplate` walks through. Every
-// `{key}` placeholder in a page or shell template maps to one branch
-// here — add a key and every page that uses it sees it.
-pub const RenderCtx = struct {
-    content: Content,
+pub const ShellCtx = struct {
+    title: []const u8,
     device: []const u8,
+    content: []const u8,
 
-    pub fn get(self: RenderCtx, key: []const u8) []const u8 {
-        if (std.mem.eql(u8, key, "title")) return self.content.title;
-        if (std.mem.eql(u8, key, "device")) return self.device;
-        return self.content.get(key);
+    pub fn get(self: ShellCtx, key: []const u8) []const u8 {
+        return h.ctxGet(self, key);
     }
 };
 
 // ---------------------------------------------------------------------
-// Per-device JSON cache blob with memoisation keyed on store version.
+// Per-device JSON cache blob, memoised on store version.
 // ---------------------------------------------------------------------
 
 pub const Cache = struct {
@@ -54,18 +51,12 @@ pub const Cache = struct {
         }
     }
 
-    fn slotFor(device: []const u8) ?usize {
-        if (std.mem.eql(u8, device, "d")) return 0;
-        if (std.mem.eql(u8, device, "m")) return 1;
-        return null;
-    }
-
     pub fn getBlob(
         self: *Cache,
         device: []const u8,
         store: *CmsStore,
     ) ![]const u8 {
-        const slot = slotFor(device) orelse return error.UnknownDevice;
+        const slot = router.deviceIdx(device);
         const current = store.currentVersion();
 
         self.mu.lock();
@@ -79,7 +70,7 @@ pub const Cache = struct {
 
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.gpa);
-        try renderCacheBlob(buf.writer(self.gpa), device, store);
+        try renderCacheBlob(self.gpa, buf.writer(self.gpa), device, store);
         e.blob = try buf.toOwnedSlice(self.gpa);
         e.version = current;
         return e.blob.?;
@@ -87,44 +78,53 @@ pub const Cache = struct {
 };
 
 // ---------------------------------------------------------------------
-// Rendering.
+// Request-time rendering.
 // ---------------------------------------------------------------------
 
 pub fn renderDocument(
+    allocator: std.mem.Allocator,
     w: anytype,
     path: []const u8,
     device: []const u8,
     store: *CmsStore,
 ) !void {
-    const i = manifest.findIndex(path) orelse return error.NotFound;
-    const page = manifest.pages[i];
+    const idx = router.find(path) orelse return error.NotFound;
+    const page = router.pages[idx];
     const content = store.get(path) orelse Content{ .title = page.default_title };
-    const ctx = RenderCtx{ .content = content, .device = device };
-    try h.writeTemplate(w, page.full_template, ctx);
+
+    // Pass 1 — page body into a buffer.
+    var body_buf: std.ArrayList(u8) = .empty;
+    defer body_buf.deinit(allocator);
+    try router.renderBody(idx, body_buf.writer(allocator), allocator, device, content);
+
+    // Pass 2 — envelope around it.
+    const shell = ShellCtx{
+        .title = content.title,
+        .device = device,
+        .content = body_buf.items,
+    };
+    try h.writeTemplate(w, document.template, shell);
 }
 
 pub fn renderCacheBlob(
+    allocator: std.mem.Allocator,
     w: anytype,
     device: []const u8,
     store: *CmsStore,
 ) !void {
     try w.writeAll("{\"body\":\"");
     {
-        const ctx = RenderCtx{
-            .content = .{ .title = "" },
-            .device = device,
-        };
+        const shell = ShellCtx{ .title = "", .device = device, .content = "" };
         var esc = jsonEscaper(w);
-        try h.writeTemplate(&esc, manifest.empty_document, ctx);
+        try h.writeTemplate(&esc, document.empty, shell);
     }
     try w.writeAll("\",\"cache\":{");
 
     var first = true;
-    for (manifest.pages) |p| {
+    for (router.pages, 0..) |p, idx| {
         if (!first) try w.writeAll(",");
         first = false;
         const content = store.get(p.path) orelse Content{ .title = p.default_title };
-        const ctx = RenderCtx{ .content = content, .device = device };
 
         try w.writeByte('"');
         try writeJsonEscaped(w, p.path);
@@ -133,14 +133,14 @@ pub fn renderCacheBlob(
         try w.writeAll("\",\"html\":\"");
         {
             var esc = jsonEscaper(w);
-            try h.writeTemplate(&esc, p.body_template, ctx);
+            try router.renderBody(idx, &esc, allocator, device, content);
         }
         try w.writeAll("\"}");
     }
 
     try w.writeAll("},\"routes\":{");
     first = true;
-    for (manifest.pages) |p| {
+    for (router.pages) |p| {
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeByte('"');

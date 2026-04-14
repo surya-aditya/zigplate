@@ -90,30 +90,20 @@ pub const Store = struct {
     // Seed with defaults so the server can render before the real CMS
     // adapter reports in.
     pub fn seed(self: *Store) !void {
-        try self.replaceLiteral("/", .{
-            .title = "Home",
-            .heading = "zigplate",
-            .body = "Selamat datang — this page is rendered server-side per device on every request.",
-        });
-        try self.replaceLiteral("/about", .{
-            .title = "About",
-            .heading = "About",
-            .body = "Zig for server + bundler + SSR; TypeScript for the client.",
-        });
-    }
-
-    const Seed = struct {
-        title: []const u8,
-        heading: []const u8,
-        body: []const u8,
-    };
-
-    fn replaceLiteral(self: *Store, route: []const u8, s: Seed) !void {
-        var c = Content{ .title = s.title };
-        try c.fields.put(self.gpa, "heading", s.heading);
-        try c.fields.put(self.gpa, "body", s.body);
-        defer c.fields.deinit(self.gpa);
-        try self.replace(route, c);
+        {
+            var c = Content{ .title = "Home" };
+            defer c.fields.deinit(self.gpa);
+            try c.fields.put(self.gpa, "heading", "zigplate");
+            try c.fields.put(self.gpa, "subtitle", "Rendered server-side, per device, on every request.");
+            try self.replace("/", c);
+        }
+        {
+            var c = Content{ .title = "About" };
+            defer c.fields.deinit(self.gpa);
+            try c.fields.put(self.gpa, "heading", "About");
+            try c.fields.put(self.gpa, "body", "Zig for server + bundler + SSR; TypeScript for the client.");
+            try self.replace("/about", c);
+        }
     }
 
     // Discard everything and bump the version so caches rebuild.

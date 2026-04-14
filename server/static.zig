@@ -82,7 +82,7 @@ pub fn handle(
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
 
-        render.renderDocument(buf.writer(allocator), normalized, device, ctx.store) catch |err| switch (err) {
+        render.renderDocument(allocator, buf.writer(allocator), normalized, device, ctx.store) catch |err| switch (err) {
             error.NotFound => {
                 try req.respond("not found", .{ .status = .not_found });
                 std.debug.print("  \x1b[31m404\x1b[0m {s}\n", .{raw_path});

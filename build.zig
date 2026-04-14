@@ -38,37 +38,66 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const index_view_mod = b.createModule(.{
-        .root_source_file = b.path("src/views/index.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    index_view_mod.addImport("html", html_mod);
-    index_view_mod.addImport("cms", cms_store_mod);
+    // Module naming mirrors filesystem paths with `_` separators:
+    //   src/views/document.zig             → "document"
+    //   src/views/layouts/page.zig         → "layouts_page"
+    //   src/views/components/feature_card  → "components_feature_card"
+    //   src/views/pages/home.zig           → "pages_home"
+    //   src/views/router.zig               → "router"
 
-    const about_view_mod = b.createModule(.{
-        .root_source_file = b.path("src/views/about.zig"),
+    // Document envelope.
+    const document_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/document.zig"),
         .target = target,
         .optimize = optimize,
     });
-    about_view_mod.addImport("html", html_mod);
-    about_view_mod.addImport("cms", cms_store_mod);
+    document_mod.addImport("html", html_mod);
 
-    const shell_mod = b.createModule(.{
-        .root_source_file = b.path("src/views/shell.zig"),
+    // Layouts — per-page wrappers.
+    const layouts_page_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/layouts/page.zig"),
         .target = target,
         .optimize = optimize,
     });
-    shell_mod.addImport("html", html_mod);
+    layouts_page_mod.addImport("html", html_mod);
 
-    const manifest_mod = b.createModule(.{
-        .root_source_file = b.path("src/views/manifest.zig"),
+    // Components (atoms).
+    const components_feature_card_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/components/feature_card.zig"),
         .target = target,
         .optimize = optimize,
     });
-    manifest_mod.addImport("shell", shell_mod);
-    manifest_mod.addImport("index_view", index_view_mod);
-    manifest_mod.addImport("about_view", about_view_mod);
+    components_feature_card_mod.addImport("html", html_mod);
+
+    // Pages.
+    const pages_home_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/pages/home.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pages_home_mod.addImport("html", html_mod);
+    pages_home_mod.addImport("cms", cms_store_mod);
+    pages_home_mod.addImport("components_feature_card", components_feature_card_mod);
+    pages_home_mod.addImport("layouts_page", layouts_page_mod);
+
+    const pages_about_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/pages/about.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pages_about_mod.addImport("html", html_mod);
+    pages_about_mod.addImport("cms", cms_store_mod);
+    pages_about_mod.addImport("layouts_page", layouts_page_mod);
+
+    // Router — registry + dispatch.
+    const router_mod = b.createModule(.{
+        .root_source_file = b.path("src/views/router.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    router_mod.addImport("cms", cms_store_mod);
+    router_mod.addImport("pages_home", pages_home_mod);
+    router_mod.addImport("pages_about", pages_about_mod);
 
     const server_mod = b.createModule(.{
         .root_source_file = b.path("server/main.zig"),
@@ -77,8 +106,8 @@ pub fn build(b: *std.Build) void {
     });
     server_mod.addImport("html", html_mod);
     server_mod.addImport("cms", cms_store_mod);
-    server_mod.addImport("shell", shell_mod);
-    server_mod.addImport("manifest", manifest_mod);
+    server_mod.addImport("document", document_mod);
+    server_mod.addImport("router", router_mod);
 
     const exe = b.addExecutable(.{
         .name = "zigplate",

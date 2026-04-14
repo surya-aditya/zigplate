@@ -1,59 +1,115 @@
 const std = @import("std");
+const render = @import("render.zig");
 
-// Handle a single HTTP connection by serving a static file from `root`.
+// ---------------------------------------------------------------------
+// Request handler.
 //
-// HTML requests are routed through a per-device lookup: `/about.html`
-// becomes `public/about.<d|m>.html` depending on the User-Agent header.
-// That way the browser receives a fully pre-rendered, device-specific
-// document with the right JS bundle tag already baked in — no runtime
-// sniffing, no flash-of-wrong-layout.
+//   * GET `/_cms/invalidate`      → rebuild render cache on next hit
+//   * POST `/_cms/invalidate`     → same (the real CMS webhook verb)
+//   * `/<route>?d=<device>`       → SSR JSON cache blob for that device
+//   * `/`, `/about`, ...          → SSR full HTML document
+//   * everything else             → static file from `root`
+// ---------------------------------------------------------------------
+
+pub const Ctx = struct {
+    root: []const u8,
+    store: *render.CmsStore,
+    cache: *render.Cache,
+};
+
 pub fn handle(
     allocator: std.mem.Allocator,
     conn: std.net.Server.Connection,
-    root: []const u8,
+    ctx: Ctx,
 ) !void {
     defer conn.stream.close();
 
     var read_buf: [8192]u8 = undefined;
-    var server = std.http.Server.init(conn, &read_buf);
+    var write_buf: [8192]u8 = undefined;
+    var stream_reader = conn.stream.reader(&read_buf);
+    var stream_writer = conn.stream.writer(&write_buf);
+    var server = std.http.Server.init(stream_reader.interface(), &stream_writer.interface);
 
     var req = server.receiveHead() catch return;
-
     const target = req.head.target;
 
-    // Extract path + query separately so `/about?d=d` matches `/about`.
     const q_pos = std.mem.indexOfScalar(u8, target, '?');
     const raw_path = if (q_pos) |p| target[0..p] else target;
     const query = if (q_pos) |p| target[p + 1 ..] else "";
 
-    const path = if (std.mem.eql(u8, raw_path, "/")) "/index.html" else raw_path;
-    const clean = path;
-
-    if (std.mem.indexOf(u8, clean, "..") != null) {
+    if (std.mem.indexOf(u8, raw_path, "..") != null) {
         try req.respond("forbidden", .{ .status = .forbidden });
         return;
     }
 
-    // Detect the device from the User-Agent once; reused if this is HTML.
     const device = detectDevice(&req);
 
-    // `?d=<device>` requests serve the cache JSON for that device. The
-    // pathname is ignored for content (we still validate it has been
-    // passed) — same convention as ybp's app/server/handler.ts.
-    const cache_device = queryDevice(query);
+    // CMS webhook — invalidates the per-device render cache so the
+    // next request re-renders with the latest content.
+    if (std.mem.eql(u8, raw_path, "/_cms/invalidate")) {
+        ctx.cache.invalidate();
+        try req.respond("ok", .{
+            .status = .ok,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        std.debug.print("  \x1b[33mCMS\x1b[0m cache invalidated\n", .{});
+        return;
+    }
 
-    // Compute the filesystem path. For `.html` routes we prefer the
-    // pre-rendered per-device variant; fall back to the plain file.
-    // For `?d=` requests we serve the matching cache file directly.
-    const fs_path = if (cache_device) |dev|
-        try std.fmt.allocPrint(allocator, "{s}/cache/{s}.json", .{ root, dev })
-    else
-        try resolvePath(allocator, root, clean, device);
+    // `?d=<device>` is the client bootstrap request — Controller fires
+    // it once the SPA is ready and expects the full route cache back.
+    if (queryDevice(query)) |dev| {
+        const blob = ctx.cache.getBlob(dev, ctx.store) catch |err| {
+            try req.respond("cache error", .{ .status = .internal_server_error });
+            std.debug.print("  \x1b[31m500\x1b[0m cache {s}: {s}\n", .{ dev, @errorName(err) });
+            return;
+        };
+        try req.respond(blob, .{
+            .status = .ok,
+            .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+        });
+        std.debug.print(
+            "  \x1b[32m200\x1b[0m \x1b[2m[{s}]\x1b[0m cache \x1b[2m({d} bytes)\x1b[0m\n",
+            .{ dev, blob.len },
+        );
+        return;
+    }
+
+    // HTML routes → SSR. Anything with a "real" extension (.css, .js,
+    // .png, …) falls through to the static branch.
+    if (isPageRoute(raw_path)) {
+        const normalized = normalizePath(raw_path);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+
+        render.renderDocument(buf.writer(allocator), normalized, device, ctx.store) catch |err| switch (err) {
+            error.NotFound => {
+                try req.respond("not found", .{ .status = .not_found });
+                std.debug.print("  \x1b[31m404\x1b[0m {s}\n", .{raw_path});
+                return;
+            },
+            else => return err,
+        };
+
+        try req.respond(buf.items, .{
+            .status = .ok,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/html; charset=utf-8" }},
+        });
+        std.debug.print(
+            "  \x1b[32m200\x1b[0m \x1b[2m[{s}]\x1b[0m {s} \x1b[2m({d} bytes SSR)\x1b[0m\n",
+            .{ device, raw_path, buf.items.len },
+        );
+        return;
+    }
+
+    // Static asset passthrough.
+    const rel = if (raw_path.len > 0 and raw_path[0] == '/') raw_path[1..] else raw_path;
+    const fs_path = try std.fs.path.join(allocator, &.{ ctx.root, rel });
     defer allocator.free(fs_path);
 
     const file = std.fs.cwd().openFile(fs_path, .{}) catch {
         try req.respond("not found", .{ .status = .not_found });
-        std.debug.print("  \x1b[31m404\x1b[0m {s}\n", .{clean});
+        std.debug.print("  \x1b[31m404\x1b[0m {s}\n", .{raw_path});
         return;
     };
     defer file.close();
@@ -70,54 +126,27 @@ pub fn handle(
     });
     std.debug.print(
         "  \x1b[32m200\x1b[0m \x1b[2m[{s}]\x1b[0m {s} \x1b[2m({d} bytes)\x1b[0m\n",
-        .{ device, clean, stat.size },
+        .{ device, raw_path, stat.size },
     );
 }
 
-// Resolve a request path to a filesystem path.
-//
-// HTML routing — clean URLs without an extension are treated as page
-// routes and resolved to `<page>.<device>.html`:
-//
-//   /            → public/index.<d>.html
-//   /about       → public/about.<d>.html
-//   /about.html  → public/about.<d>.html      (legacy, also supported)
-//
-// Anything that DOES have an extension (.css, .js, .png, …) skips the
-// page-route logic and is served directly.
-fn resolvePath(
-    allocator: std.mem.Allocator,
-    root: []const u8,
-    clean: []const u8,
-    device: []const u8,
-) ![]u8 {
-    if (std.mem.eql(u8, clean, "/")) {
-        return std.fmt.allocPrint(allocator, "{s}/index.{s}.html", .{ root, device });
-    }
-
-    const rel = clean[1..]; // strip leading '/'
-    const stem = if (std.mem.endsWith(u8, rel, ".html"))
-        rel[0 .. rel.len - ".html".len]
-    else if (std.mem.indexOfScalar(u8, rel, '.') == null)
-        rel
-    else
-        return std.fs.path.join(allocator, &.{ root, rel }); // static asset
-
-    const variant = try std.fmt.allocPrint(allocator, "{s}/{s}.{s}.html", .{ root, stem, device });
-    errdefer allocator.free(variant);
-
-    // Fall back to a plain `<stem>.html` if the per-device variant is missing.
-    std.fs.cwd().access(variant, .{}) catch {
-        allocator.free(variant);
-        return std.fmt.allocPrint(allocator, "{s}/{s}.html", .{ root, stem });
-    };
-    return variant;
+// A "page route" is either `/` or a path with no file extension. Paths
+// with extensions are treated as static assets.
+fn isPageRoute(path: []const u8) bool {
+    if (std.mem.eql(u8, path, "/")) return true;
+    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return false;
+    const tail = path[last_slash + 1 ..];
+    return std.mem.indexOfScalar(u8, tail, '.') == null;
 }
 
-// Pick `d` or `m` out of the query string when the client asks for the
-// cache JSON, e.g. `/about?d=m`. Returns null when there's no `d=` key.
+fn normalizePath(path: []const u8) []const u8 {
+    if (path.len == 0) return "/";
+    if (path.len > 1 and path[path.len - 1] == '/') return path[0 .. path.len - 1];
+    return path;
+}
+
 fn queryDevice(query: []const u8) ?[]const u8 {
-    var it = std.mem.tokenize(u8, query, "&");
+    var it = std.mem.tokenizeScalar(u8, query, '&');
     while (it.next()) |pair| {
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
         const key = pair[0..eq];
@@ -140,8 +169,6 @@ fn detectDevice(req: *std.http.Server.Request) []const u8 {
 }
 
 fn classify(ua: []const u8) []const u8 {
-    // Very small sniff list — good enough for the prerender dispatch and
-    // matches the heuristic the reference ybp client used.
     const mobile_needles = [_][]const u8{ "Mobi", "Android", "iPhone", "iPad", "iPod" };
     for (mobile_needles) |needle| {
         if (std.ascii.indexOfIgnoreCase(ua, needle) != null) return "m";
@@ -150,7 +177,6 @@ fn classify(ua: []const u8) []const u8 {
 }
 
 fn contentType(path: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, path, ".html")) return "text/html; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".css")) return "text/css; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".js")) return "application/javascript; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".json")) return "application/json";

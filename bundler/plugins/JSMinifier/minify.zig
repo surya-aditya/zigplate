@@ -3,8 +3,8 @@ const std = @import("std");
 // Strip comments and collapse whitespace from JavaScript source. Strings
 // and template literals are copied verbatim. Caller owns the result.
 pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
 
     var i: usize = 0;
 
@@ -18,7 +18,7 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     while (i < src.len) {
         // Inside a template literal — copy verbatim, watching for the close.
         if (in_template) {
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             if (src[i] == '`' and (i == 0 or src[i - 1] != '\\')) {
                 in_template = false;
             }
@@ -28,7 +28,7 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
 
         // Inside a regular string — copy verbatim until the matching quote.
         if (in_string) |quote| {
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             if (src[i] == quote and (i == 0 or src[i - 1] != '\\')) {
                 in_string = null;
             }
@@ -58,7 +58,7 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
         // Template literal opener.
         if (src[i] == '`') {
             in_template = true;
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             i += 1;
             continue;
         }
@@ -66,7 +66,7 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
         // Regular string opener.
         if (src[i] == '\'' or src[i] == '"') {
             in_string = src[i];
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             i += 1;
             continue;
         }
@@ -80,12 +80,12 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
                 var j = i + 1;
                 while (j < src.len and std.ascii.isWhitespace(src[j])) : (j += 1) {}
                 if (j < src.len and needsSpace(last) and needsSpace(src[j])) {
-                    try out.append(' ');
+                    try out.append(allocator, ' ');
                 } else if (j < src.len and ((last == '-' and src[j] == '-') or (last == '+' and src[j] == '+'))) {
                     // Keep a space between `-` and `--`/`-` (and `+`/`++`)
                     // so JS's maximal-munch tokenizer doesn't misread
                     // `1 - --x` as `1 -- -x` (postfix on a literal).
-                    try out.append(' ');
+                    try out.append(allocator, ' ');
                 }
             }
             while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
@@ -100,17 +100,17 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
                 i += 1;
                 continue;
             }
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             i += 1;
             continue;
         }
 
         // Anything else: copy as-is.
-        try out.append(src[i]);
+        try out.append(allocator, src[i]);
         i += 1;
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 // Identifier-like bytes need separation from each other; punctuation does not.

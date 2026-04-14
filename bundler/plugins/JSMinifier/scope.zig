@@ -16,9 +16,9 @@ pub const ScopeTree = struct {
     current: u32,
 
     pub fn init(allocator: std.mem.Allocator) !ScopeTree {
-        var scopes = std.ArrayList(Scope).init(allocator);
+        var scopes: std.ArrayList(Scope) = .empty;
         // Seed with the root scope.
-        try scopes.append(.{
+        try scopes.append(allocator, .{
             .parent = null,
             .renames = std.StringHashMap([]const u8).init(allocator),
         });
@@ -31,7 +31,7 @@ pub const ScopeTree = struct {
 
     pub fn deinit(self: *ScopeTree) void {
         for (self.scopes.items) |*s| s.renames.deinit();
-        self.scopes.deinit();
+        self.scopes.deinit(self.allocator);
     }
 
     pub fn isRoot(self: *const ScopeTree) bool {
@@ -41,7 +41,7 @@ pub const ScopeTree = struct {
     // Create a new child of `current` and descend into it.
     pub fn enter(self: *ScopeTree) !void {
         const child_id: u32 = @intCast(self.scopes.items.len);
-        try self.scopes.append(.{
+        try self.scopes.append(self.allocator, .{
             .parent = self.current,
             .renames = std.StringHashMap([]const u8).init(self.allocator),
         });

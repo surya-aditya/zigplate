@@ -151,7 +151,7 @@ fn collectMethodsInClassBody(
             short = gen.next(&buf);
         }
         const owned = try allocator.dupe(u8, short);
-        try name_storage.append(owned);
+        try name_storage.append(allocator, owned);
         try props.map.put(ident, owned);
     }
 }

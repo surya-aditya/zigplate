@@ -18,8 +18,8 @@ pub fn emit(
     src: []const u8,
     scope_of_token: []const u32,
 ) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
 
     tree.rewind();
 
@@ -34,7 +34,7 @@ pub fn emit(
             // the regular scope chain.
             if (isPropertyAccess(tokens, src, i) or props.isDeclaration(i)) {
                 if (props.get(text)) |renamed| {
-                    try out.appendSlice(renamed);
+                    try out.appendSlice(allocator,renamed);
                     continue;
                 }
             } else if (isPropertyKey(tokens, src, i) or isObjectMethodShorthand(tokens, src, i)) {
@@ -46,9 +46,9 @@ pub fn emit(
                 // outgoing property key stays the original spelling
                 // while the value still resolves to the renamed local.
                 if (tree.lookup(text)) |renamed| {
-                    try out.appendSlice(text);
-                    try out.appendSlice(":");
-                    try out.appendSlice(renamed);
+                    try out.appendSlice(allocator,text);
+                    try out.appendSlice(allocator,":");
+                    try out.appendSlice(allocator,renamed);
                     continue;
                 }
             } else if (!isContextualKeywordUsage(tokens, src, i, text)) {
@@ -56,18 +56,18 @@ pub fn emit(
                 // contextual keywords used in syntax position
                 // (`get [x]()`, `set name()`) that must stay verbatim.
                 if (tree.lookup(text)) |renamed| {
-                    try out.appendSlice(renamed);
+                    try out.appendSlice(allocator,renamed);
                     continue;
                 }
             }
 
-            try out.appendSlice(text);
+            try out.appendSlice(allocator,text);
         } else {
-            try out.appendSlice(src[tok.start..tok.end]);
+            try out.appendSlice(allocator,src[tok.start..tok.end]);
         }
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 // True if the identifier at `index` is the right-hand side of a `.`

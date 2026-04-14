@@ -57,8 +57,8 @@ pub fn main() !void {
 
 // Minifier engine
 pub fn minifyCss(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
 
     var i: usize = 0;
 
@@ -77,7 +77,7 @@ pub fn minifyCss(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
 
             // Copy the current byte to output without any changes.
             // `try` because .append() can fail if allocation fails.
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
 
             // Check if this byte closes the string
             if (src[i] == quote and (i == 0 or src[i - 1] != '\\')) {
@@ -115,7 +115,7 @@ pub fn minifyCss(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
             in_string = src[i];
 
             // Output the opening quote itself.
-            try out.append(src[i]);
+            try out.append(allocator, src[i]);
             i += 1;
             continue;
         }
@@ -137,7 +137,7 @@ pub fn minifyCss(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
                 }
 
                 if (j < src.len and !isRemovable(src[j])) {
-                    try out.append(' '); // Emit exactly one space.
+                    try out.append(allocator, ' ');
                 }
             }
 
@@ -152,12 +152,12 @@ pub fn minifyCss(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
         // Just copy the byte
         // ============================================================
 
-        try out.append(src[i]);
+        try out.append(allocator, src[i]);
         i += 1;
     }
 
     // Convert the ArrayList into a plain []u8 slice.
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 // These punctuation characters never need a space after them,

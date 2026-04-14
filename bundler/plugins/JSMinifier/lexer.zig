@@ -21,7 +21,7 @@ pub const Token = struct {
 // Emits the literal chunks (including their backtick / `${` boundaries)
 // as `.string` tokens, and re-enters normal tokenization for each
 // `${ … }` interpolation so the identifiers inside get renamed.
-fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) anyerror!void {
+fn tokenizeTemplate(allocator: std.mem.Allocator, tokens: *std.ArrayList(Token), src: []const u8, i: *usize) anyerror!void {
     var pos = i.*;
     const open_start = pos;
     pos += 1; // skip opening backtick
@@ -35,7 +35,7 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
         }
         if (c == '`') {
             // Trailing chunk + close.
-            try tokens.append(.{ .kind = .string, .start = chunk_start, .end = pos + 1 });
+            try tokens.append(allocator, .{ .kind = .string, .start = chunk_start, .end = pos + 1 });
             pos += 1;
             i.* = pos;
             return;
@@ -43,7 +43,7 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
         if (c == '$' and pos + 1 < src.len and src[pos + 1] == '{') {
             // Emit the literal chunk including `${`, then recurse into
             // the interpolation as ordinary JS until the matching `}`.
-            try tokens.append(.{ .kind = .string, .start = chunk_start, .end = pos + 2 });
+            try tokens.append(allocator, .{ .kind = .string, .start = chunk_start, .end = pos + 2 });
             pos += 2;
 
             var depth: usize = 1;
@@ -65,12 +65,12 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
                         }
                         pos += 1;
                     }
-                    try tokens.append(.{ .kind = .string, .start = inner_start, .end = pos });
+                    try tokens.append(allocator, .{ .kind = .string, .start = inner_start, .end = pos });
                     continue;
                 }
 
                 if (ch == '`') {
-                    try tokenizeTemplate(tokens, src, &pos);
+                    try tokenizeTemplate(allocator, tokens, src, &pos);
                     continue;
                 }
 
@@ -78,7 +78,7 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
                     while (pos < src.len and (std.ascii.isAlphanumeric(src[pos]) or src[pos] == '_' or src[pos] == '$')) {
                         pos += 1;
                     }
-                    try tokens.append(.{ .kind = .identifier, .start = inner_start, .end = pos });
+                    try tokens.append(allocator, .{ .kind = .identifier, .start = inner_start, .end = pos });
                     continue;
                 }
 
@@ -98,13 +98,13 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
                         }
                         break;
                     }
-                    try tokens.append(.{ .kind = .number, .start = inner_start, .end = pos });
+                    try tokens.append(allocator, .{ .kind = .number, .start = inner_start, .end = pos });
                     continue;
                 }
 
                 if (std.ascii.isWhitespace(ch)) {
                     while (pos < src.len and std.ascii.isWhitespace(src[pos])) : (pos += 1) {}
-                    try tokens.append(.{ .kind = .whitespace, .start = inner_start, .end = pos });
+                    try tokens.append(allocator, .{ .kind = .whitespace, .start = inner_start, .end = pos });
                     continue;
                 }
 
@@ -122,7 +122,7 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
                         break;
                     }
                 }
-                try tokens.append(.{ .kind = .symbol, .start = inner_start, .end = inner_start + 1 });
+                try tokens.append(allocator, .{ .kind = .symbol, .start = inner_start, .end = inner_start + 1 });
                 pos += 1;
             }
             continue;
@@ -131,15 +131,15 @@ fn tokenizeTemplate(tokens: *std.ArrayList(Token), src: []const u8, i: *usize) a
     }
 
     // Unterminated template — emit whatever we have.
-    try tokens.append(.{ .kind = .string, .start = chunk_start, .end = pos });
+    try tokens.append(allocator, .{ .kind = .string, .start = chunk_start, .end = pos });
     i.* = pos;
 }
 
 // Breaks the source into a flat list of tokens. The caller owns the returned
 // slice and must free it with `allocator.free(...)`.
 pub fn tokenize(allocator: std.mem.Allocator, src: []const u8) ![]Token {
-    var tokens = std.ArrayList(Token).init(allocator);
-    errdefer tokens.deinit();
+    var tokens: std.ArrayList(Token) = .empty;
+    errdefer tokens.deinit(allocator);
 
     var i: usize = 0;
     while (i < src.len) {
@@ -160,7 +160,7 @@ pub fn tokenize(allocator: std.mem.Allocator, src: []const u8) ![]Token {
                 }
                 i += 1;
             }
-            try tokens.append(.{ .kind = .string, .start = start, .end = i });
+            try tokens.append(allocator, .{ .kind = .string, .start = start, .end = i });
             continue;
         }
 
@@ -168,7 +168,7 @@ pub fn tokenize(allocator: std.mem.Allocator, src: []const u8) ![]Token {
         // chunks as `.string` tokens but recurse into `${ … }` so the
         // identifiers inside get renamed by the mangler.
         if (src[i] == '`') {
-            try tokenizeTemplate(&tokens, src, &i);
+            try tokenizeTemplate(allocator, &tokens, src, &i);
             continue;
         }
 
@@ -177,7 +177,7 @@ pub fn tokenize(allocator: std.mem.Allocator, src: []const u8) ![]Token {
             while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_' or src[i] == '$')) {
                 i += 1;
             }
-            try tokens.append(.{ .kind = .identifier, .start = start, .end = i });
+            try tokens.append(allocator, .{ .kind = .identifier, .start = start, .end = i });
             continue;
         }
 
@@ -200,21 +200,21 @@ pub fn tokenize(allocator: std.mem.Allocator, src: []const u8) ![]Token {
                 }
                 break;
             }
-            try tokens.append(.{ .kind = .number, .start = start, .end = i });
+            try tokens.append(allocator, .{ .kind = .number, .start = start, .end = i });
             continue;
         }
 
         // Whitespace: coalesce runs into a single token.
         if (std.ascii.isWhitespace(src[i])) {
             while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
-            try tokens.append(.{ .kind = .whitespace, .start = start, .end = i });
+            try tokens.append(allocator, .{ .kind = .whitespace, .start = start, .end = i });
             continue;
         }
 
         // Anything else is a single-byte symbol.
         i += 1;
-        try tokens.append(.{ .kind = .symbol, .start = start, .end = i });
+        try tokens.append(allocator, .{ .kind = .symbol, .start = start, .end = i });
     }
 
-    return tokens.toOwnedSlice();
+    return tokens.toOwnedSlice(allocator);
 }

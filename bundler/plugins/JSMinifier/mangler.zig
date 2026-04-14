@@ -30,10 +30,10 @@ pub fn mangleWith(allocator: std.mem.Allocator, src: []const u8, opts: Options) 
     defer tree.deinit();
 
     // Owns every short name allocated during mangling. Freed at the end.
-    var name_storage = std.ArrayList([]u8).init(allocator);
+    var name_storage: std.ArrayList([]u8) = .empty;
     defer {
         for (name_storage.items) |n| allocator.free(n);
-        name_storage.deinit();
+        name_storage.deinit(allocator);
     }
 
     var gen = names.NameGen{};

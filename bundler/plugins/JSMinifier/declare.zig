@@ -541,6 +541,6 @@ fn registerName(
         short = gen.next(&buf);
     }
     const owned = try tree.allocator.dupe(u8, short);
-    try name_storage.append(owned);
+    try name_storage.append(tree.allocator, owned);
     try tree.registerIn(scope_id, original, owned);
 }

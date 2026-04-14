@@ -17,9 +17,12 @@ pub fn main() !void {
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // c_allocator = system malloc. Tiny resident footprint vs. the
+    // GeneralPurposeAllocator's per-allocation metadata + leak-tracking
+    // bookkeeping (which pulls in ~1 MB of extra RSS even at idle).
+    // Each request uses an arena layered on top, so fragmentation is
+    // bounded per request.
+    const allocator = std.heap.c_allocator;
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

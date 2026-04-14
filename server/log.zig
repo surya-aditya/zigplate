@@ -76,7 +76,7 @@ pub fn statsLine(
             "  \x1b[2mErr:\x1b[0m \x1b[{s}m{d}\x1b[0m" ++
             "  \x1b[2mRenMax:\x1b[0m \x1b[36m{d}µs\x1b[0m" ++
             "  \x1b[2mCHit:\x1b[0m \x1b[36m{d:.0}%\x1b[0m" ++
-            "  \x1b[2mMem:\x1b[0m \x1b[36m{d:.1} MB\x1b[0m" ++
+            "  \x1b[2mMemory:\x1b[0m \x1b[36m{d:.1} MB\x1b[0m" ++
             "  \x1b[2mCPU:\x1b[0m \x1b[36m{d}ms u / {d}ms s\x1b[0m\n",
         .{
             req_total,

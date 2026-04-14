@@ -55,6 +55,7 @@ pub fn collect(
         // from `globalThis`, so renaming them is safe as long as the code
         // isn't meant to leak globals.
         if (reserved.isDeclarationKeyword(text)) {
+            if (isExported(tokens, src, ti)) continue;
             try registerDeclarationTargets(tree, gen, name_storage, tokens, src, ti + 1, here);
             continue;
         }
@@ -64,8 +65,9 @@ pub fn collect(
         // mangled: `obj.method` uses the same key, and `obj` could be
         // anything — only Terser's opt-in property mangler attempts this.
         if (std.mem.eql(u8, text, "class")) {
+            const exported = isExported(tokens, src, ti);
             const after_kw = skipWhitespace(tokens, ti + 1);
-            if (after_kw < tokens.len and tokens[after_kw].kind == .identifier) {
+            if (!exported and after_kw < tokens.len and tokens[after_kw].kind == .identifier) {
                 const name = src[tokens[after_kw].start..tokens[after_kw].end];
                 if (!reserved.isReserved(name)) {
                     try registerName(tree, gen, name_storage, here, name);
@@ -75,12 +77,16 @@ pub fn collect(
         }
 
         // `function name(params) { body }` — register the function name in
-        // the enclosing scope and the params in the body scope.
+        // the enclosing scope and the params in the body scope. Exported
+        // function names are kept (only the body-local params mangled).
         if (std.mem.eql(u8, text, "function")) {
+            const exported = isExported(tokens, src, ti);
             const after_kw = skipWhitespace(tokens, ti + 1);
             var after_name = after_kw;
             if (after_kw < tokens.len and tokens[after_kw].kind == .identifier) {
-                try registerName(tree, gen, name_storage, here, src[tokens[after_kw].start..tokens[after_kw].end]);
+                if (!exported) {
+                    try registerName(tree, gen, name_storage, here, src[tokens[after_kw].start..tokens[after_kw].end]);
+                }
                 after_name = after_kw + 1;
             }
             try registerParamsForBody(tree, gen, name_storage, tokens, src, after_name, scope_of_token, here);
@@ -143,7 +149,7 @@ fn registerMethodParams(
     name_storage: *std.ArrayList([]u8),
     tokens: []const Token,
     src: []const u8,
-    scope_of_token: []const u32,
+    scope_of_token: []u32,
 ) !void {
     var i: usize = 0;
     while (i + 1 < tokens.len) : (i += 1) {
@@ -172,15 +178,24 @@ fn registerMethodParams(
             if (c == '=' or c == '>' or c == '(' or c == ',' or c == ';' or c == '{' or c == '}') continue;
         }
 
-        // Register each identifier inside the param list in body_scope
-        // and rebase scope_of_token so the param tokens render as the
-        // renamed form.
+        // Register each identifier inside the param list in body_scope.
+        // Skip shorthand identifiers in object destructuring (`{cb, de}`)
+        // and object property keys (`{k: local}` — `k` is the key) — only
+        // their renamed local counterparts get registered. See the same
+        // rule in registerIdentsInGroup.
         const body_scope = scope_of_token[brace_at];
         var j: usize = open + 1;
+        var brace_depth: usize = 0;
         while (j < i) : (j += 1) {
             const tt = tokens[j];
+            if (tt.kind == .symbol) {
+                const c = src[tt.start];
+                if (c == '{') brace_depth += 1;
+                if (c == '}' and brace_depth > 0) brace_depth -= 1;
+            }
             if (tt.kind != .identifier) continue;
-            scope_of_token_mut(scope_of_token)[j] = body_scope;
+            if (brace_depth > 0 and isObjectKeyInGroup(tokens, src, j)) continue;
+            scope_of_token[j] = body_scope;
             const name = src[tt.start..tt.end];
             if (reserved.isReserved(name)) continue;
             try registerName(tree, gen, name_storage, body_scope, name);
@@ -219,8 +234,32 @@ fn skipWhitespace(tokens: []const Token, from: usize) usize {
     return i;
 }
 
-// Starting at the token just after `var/let/const`, register each binding
-// target. Supports plain identifiers and `{a,b}` / `[a,b]` destructuring.
+// True if the declaration that starts at `ti` is preceded by `export`
+// (including `export default`). Exported bindings must keep their names so
+// other modules importing them still resolve correctly.
+fn isExported(tokens: []const Token, src: []const u8, ti: usize) bool {
+    if (ti == 0) return false;
+    var b: usize = ti - 1;
+    while (b > 0 and tokens[b].kind == .whitespace) : (b -= 1) {}
+    const prev = tokens[b];
+    if (prev.kind != .identifier) return false;
+
+    const t = src[prev.start..prev.end];
+    if (std.mem.eql(u8, t, "export")) return true;
+    if (std.mem.eql(u8, t, "default") and b > 0) {
+        var b2: usize = b - 1;
+        while (b2 > 0 and tokens[b2].kind == .whitespace) : (b2 -= 1) {}
+        const p2 = tokens[b2];
+        if (p2.kind == .identifier and std.mem.eql(u8, src[p2.start..p2.end], "export")) return true;
+    }
+    return false;
+}
+
+// Starting at the token just after `var/let/const`, register every
+// binding target in the declaration. Handles multi-declarations
+// (`var a, b, c = …`), destructuring (`{a, b}` and `[a, b]`), and
+// initializers (the `= expr` part is skipped, including any nested
+// braces/brackets/parens).
 fn registerDeclarationTargets(
     tree: *ScopeTree,
     gen: *NameGen,
@@ -230,18 +269,52 @@ fn registerDeclarationTargets(
     from: usize,
     scope_id: u32,
 ) !void {
-    const start = skipWhitespace(tokens, from);
-    if (start >= tokens.len) return;
+    var i: usize = skipWhitespace(tokens, from);
+    var expect_binding: bool = true;
+    var depth: usize = 0;
 
-    const t = tokens[start];
-    if (t.kind == .symbol) {
-        const c = src[t.start];
-        if (c == '{') try registerIdentsInGroup(tree, gen, name_storage, tokens, src, start, '{', '}', scope_id);
-        if (c == '[') try registerIdentsInGroup(tree, gen, name_storage, tokens, src, start, '[', ']', scope_id);
-        return;
-    }
-    if (t.kind == .identifier) {
-        try registerName(tree, gen, name_storage, scope_id, src[t.start..t.end]);
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+
+        if (t.kind == .symbol) {
+            const c = src[t.start];
+            // Statement terminator at top level ends the declaration.
+            if (depth == 0 and c == ';') break;
+            // A bare `,` only ends the current binding when not nested
+            // inside an initializer's brackets/parens.
+            if (depth == 0 and c == ',') {
+                expect_binding = true;
+                continue;
+            }
+            // Track depth for `()`, `[]`, `{}` so nested commas in
+            // initializers don't trip the binding scanner.
+            if (c == '(' or c == '[' or c == '{') {
+                if (depth == 0 and expect_binding and (c == '{' or c == '[')) {
+                    // Destructuring pattern at the binding position —
+                    // register every identifier inside the group.
+                    const close: u8 = if (c == '{') '}' else ']';
+                    try registerIdentsInGroup(tree, gen, name_storage, tokens, src, i, c, close, scope_id);
+                    // Jump past the matching close so we don't recurse.
+                    if (findMatching(tokens, src, i, c, close)) |end_idx| {
+                        i = end_idx;
+                    }
+                    expect_binding = false;
+                    continue;
+                }
+                depth += 1;
+                continue;
+            }
+            if (c == ')' or c == ']' or c == '}') {
+                if (depth > 0) depth -= 1;
+                continue;
+            }
+            continue;
+        }
+
+        if (t.kind == .identifier and depth == 0 and expect_binding) {
+            try registerName(tree, gen, name_storage, scope_id, src[t.start..t.end]);
+            expect_binding = false;
+        }
     }
 }
 
@@ -255,7 +328,7 @@ fn registerParamsForBody(
     tokens: []const Token,
     src: []const u8,
     from: usize,
-    scope_of_token: []const u32,
+    scope_of_token: []u32,
     fallback_scope: u32,
 ) !void {
     const lp = skipWhitespace(tokens, from);
@@ -278,7 +351,7 @@ fn registerParamsForBody(
     while (i < rp) : (i += 1) {
         const t = tokens[i];
         if (t.kind != .identifier) continue;
-        scope_of_token_mut(scope_of_token)[i] = body_scope;
+        scope_of_token[i] = body_scope;
         const name = src[t.start..t.end];
         if (reserved.isReserved(name)) continue;
         try registerName(tree, gen, name_storage, body_scope, name);
@@ -302,19 +375,20 @@ fn registerArrowParams(
     tokens: []const Token,
     src: []const u8,
     eq_index: usize,
-    scope_of_token: []const u32,
+    scope_of_token: []u32,
 ) !void {
     if (eq_index == 0) return;
 
-    // Resolve the body scope: `{ … }` block has its own scope; expression
-    // bodies share the enclosing scope. Either way the params belong
-    // where we can look them up from the body.
-    const gt_index = eq_index + 1; // caller already checked `>` follows
+    // Only handle arrows with a real `{ … }` block body. The block's
+    // own scope is where the params belong. For expression-bodied
+    // arrows (`x => x*2`) we'd have to synthesise a scope and bound
+    // it precisely; instead we skip them so the params don't pollute
+    // the enclosing scope and break unrelated identifiers that share
+    // the same name.
+    const gt_index = eq_index + 1;
     const after_arrow = skipWhitespace(tokens, gt_index + 1);
-    const body_scope = if (after_arrow < tokens.len and tokens[after_arrow].kind == .symbol and src[tokens[after_arrow].start] == '{')
-        scope_of_token[after_arrow]
-    else
-        scope_of_token[eq_index];
+    if (after_arrow >= tokens.len or tokens[after_arrow].kind != .symbol or src[tokens[after_arrow].start] != '{') return;
+    const body_scope = scope_of_token[after_arrow];
 
     // Step back past whitespace to find the param source.
     var bi: usize = eq_index - 1;
@@ -324,7 +398,7 @@ fn registerArrowParams(
 
     // Unparenthesized single param: `x =>`
     if (prev.kind == .identifier) {
-        scope_of_token_mut(scope_of_token)[bi] = body_scope;
+        scope_of_token[bi] = body_scope;
         const name = src[prev.start..prev.end];
         if (!reserved.isReserved(name)) {
             try registerName(tree, gen, name_storage, body_scope, name);
@@ -348,7 +422,7 @@ fn registerArrowParams(
                 }
             }
             if (t.kind == .identifier) {
-                scope_of_token_mut(scope_of_token)[ci] = body_scope;
+                scope_of_token[ci] = body_scope;
                 const name = src[t.start..t.end];
                 if (!reserved.isReserved(name)) {
                     try registerName(tree, gen, name_storage, body_scope, name);
@@ -385,13 +459,45 @@ fn registerIdentsInGroup(
                 if (depth == 0) return;
             }
         }
-        if (t.kind == .identifier) {
+        if (t.kind == .identifier and depth == 1) {
             const name = src[t.start..t.end];
-            if (!reserved.isReserved(name)) {
-                try registerName(tree, gen, name_storage, scope_id, name);
-            }
+            if (reserved.isReserved(name)) continue;
+
+            // For object destructuring `{a, b: c, ...d}`:
+            //   `a`         (shorthand)   → register; emit will expand
+            //                                to `{a: renamed}` so the key
+            //                                on the source object stays.
+            //   `b: c`      (renamed)     → skip `b` (key), register `c`.
+            //   `...d`      (rest)        → register `d`.
+            if (open == '{' and isObjectKeyInGroup(tokens, src, i)) continue;
+            try registerName(tree, gen, name_storage, scope_id, name);
         }
     }
+}
+
+fn isShorthandInObjectGroup(tokens: []const Token, src: []const u8, index: usize) bool {
+    // next non-ws is `,` or `}` AND prev non-ws is `{` or `,`.
+    var n: usize = index + 1;
+    while (n < tokens.len and tokens[n].kind == .whitespace) : (n += 1) {}
+    if (n >= tokens.len or tokens[n].kind != .symbol) return false;
+    const nc = src[tokens[n].start];
+    if (nc != ',' and nc != '}') return false;
+
+    if (index == 0) return false;
+    var p: usize = index - 1;
+    while (p > 0 and tokens[p].kind == .whitespace) : (p -= 1) {}
+    if (tokens[p].kind != .symbol) return false;
+    const pc = src[tokens[p].start];
+    return pc == '{' or pc == ',';
+}
+
+fn isObjectKeyInGroup(tokens: []const Token, src: []const u8, index: usize) bool {
+    // identifier followed by `:` is the property key — the value side
+    // (after `:`) is what gets registered as the local binding.
+    var n: usize = index + 1;
+    while (n < tokens.len and tokens[n].kind == .whitespace) : (n += 1) {}
+    if (n >= tokens.len or tokens[n].kind != .symbol) return false;
+    return src[tokens[n].start] == ':';
 }
 
 fn findMatching(

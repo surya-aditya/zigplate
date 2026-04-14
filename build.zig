@@ -72,41 +72,95 @@ pub fn build(b: *std.Build) void {
     const css_step = b.step("css", "Minify CSS  ->  public/app.css");
     css_step.dependOn(&run_css.step);
 
-    // "zig build ts" — compile TypeScript src/ts/*.ts → src/js/*.js
-    const tsc = b.addSystemCommand(&.{ "tsc", "--project", "tsconfig.json" });
-    tsc.setCwd(b.path("."));
-    const ts_step = b.step("ts", "Compile TypeScript ->  src/js/");
-    ts_step.dependOn(&tsc.step);
+    // "zig build ts" — bundle TypeScript entries with bun. bun handles
+    // path aliases (@/…), concatenates imports, and emits a self-contained
+    // JS bundle per entry. Each entry is piped through our Zig minifier
+    // afterwards to get the final public/<name>.js.
+    const ts_entries = [_][]const u8{ "d", "m" };
+    const ts_step = b.step("ts", "Bundle TypeScript entries");
+    const js_step = b.step("js", "Bundle + minify all JS bundles");
 
-    // "zig build js" — minify the compiled JS.
-    const run_js = b.addRunArtifact(js_minifier);
-    run_js.setCwd(b.path("."));
-    run_js.addArgs(&.{ ".cache/ts/main.js", "public/app.js" });
-    run_js.step.dependOn(&tsc.step);
+    for (ts_entries) |name| {
+        const entry = b.fmt("src/js/{s}.ts", .{name});
+        const out_intermediate = b.fmt(".cache/ts/{s}.js", .{name});
+        const out_final = b.fmt("public/{s}.js", .{name});
 
-    const js_step = b.step("js", "Compile TS + minify JS -> public/app.min.js");
-    js_step.dependOn(&run_js.step);
+        // bun build entry --outfile .cache/ts/<name>.js --target browser --format=iife
+        // `iife` wraps everything in a self-invoking function so our
+        // mangler can rename every local without worrying about exports.
+        const bun = b.addSystemCommand(&.{
+            "bun",    "build",
+            entry,    "--outfile",
+            out_intermediate,
+            "--target", "browser",
+            "--format=iife",
+        });
+        bun.setCwd(b.path("."));
+        ts_step.dependOn(&bun.step);
 
-    // Copy every HTML page in src/ into public/. Add more by adding to
-    // this list — the server picks them up automatically.
-    const html_pages = [_][]const u8{ "index.html", "about.html" };
-    const copy_html_step = b.step("html", "Copy HTML pages into public/");
-    for (html_pages) |page| {
-        const src_path = b.fmt("src/{s}", .{page});
-        const copy = b.addInstallFileWithDir(b.path(src_path), .{ .custom = "../public" }, page);
-        copy_html_step.dependOn(&copy.step);
+        const run = b.addRunArtifact(js_minifier);
+        run.setCwd(b.path("."));
+        run.addArgs(&.{ out_intermediate, out_final });
+        run.step.dependOn(&bun.step);
+        js_step.dependOn(&run.step);
+    }
+
+    // Prerender tool — substitutes __DEVICE__ and __SEED_DATA__ in HTML
+    // templates to produce one pre-rendered file per (page × device).
+    const prerender = b.addExecutable(.{
+        .name = "prerender",
+        .root_source_file = b.path("bundler/plugins/Prerender/main.zig"),
+        .target = b.host,
+        .optimize = .ReleaseFast,
+    });
+
+    // `pages` maps a template basename to its data file basename. Both are
+    // resolved relative to src/ and src/data/ respectively.
+    const pages = [_][]const u8{ "index", "about" };
+    const devices = [_][]const u8{ "d", "m" };
+
+    const copy_html_step = b.step("html", "Prerender HTML pages per device");
+    for (pages) |page| {
+        for (devices) |dev| {
+            const page_html = b.fmt("src/pages/{s}.html", .{page});
+            const data = b.fmt("src/data/{s}.json", .{page});
+            const out = b.fmt("public/{s}.{s}.html", .{ page, dev });
+
+            const run = b.addRunArtifact(prerender);
+            run.setCwd(b.path("."));
+            run.addArgs(&.{ "src/shell.html", page_html, data, dev, out });
+            copy_html_step.dependOn(&run.step);
+        }
+    }
+
+    // Cache aggregator — one rich blob per device covering every route.
+    const cachegen = b.addExecutable(.{
+        .name = "cachegen",
+        .root_source_file = b.path("bundler/plugins/CacheGen/main.zig"),
+        .target = b.host,
+        .optimize = .ReleaseFast,
+    });
+    const cache_step = b.step("cache", "Build per-device route cache into public/cache/");
+    for (devices) |dev| {
+        const out = b.fmt("public/cache/{s}.json", .{dev});
+        const run = b.addRunArtifact(cachegen);
+        run.setCwd(b.path("."));
+        run.addArgs(&.{ dev, "src/shell.html", "src/pages", "src/data", out });
+        cache_step.dependOn(&run.step);
     }
 
     // "zig build bundle"
     const bundle_step = b.step("bundle", "Minify all assets (CSS + JS)");
     bundle_step.dependOn(&run_css.step);
-    bundle_step.dependOn(&run_js.step);
+    bundle_step.dependOn(js_step);
     bundle_step.dependOn(copy_html_step);
+    bundle_step.dependOn(cache_step);
 
     // Ensure `dev` bundles assets before starting the server.
     run_cmd.step.dependOn(&run_css.step);
-    run_cmd.step.dependOn(&run_js.step);
+    run_cmd.step.dependOn(js_step);
     run_cmd.step.dependOn(copy_html_step);
+    run_cmd.step.dependOn(cache_step);
     dev_step.dependOn(&run_cmd.step);
 
     // -----------------------------------------------------------------------

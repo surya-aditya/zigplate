@@ -28,7 +28,11 @@ pub fn main() !void {
     const minified = try minify.minifyJs(allocator, input);
     defer allocator.free(minified);
 
-    const mangled = try mangler.mangle(allocator, minified);
+    // Property mangling (class method renaming) is disabled by default
+    // for bundler-produced input because bun's async/decorator helpers
+    // contain class methods whose names collide with property accesses
+    // in user code, producing invalid JS. Re-enable per-project if safe.
+    const mangled = try mangler.mangleWith(allocator, minified, .{ .mangle_properties = false });
     defer allocator.free(mangled);
 
     // Make sure the output directory exists, then write.

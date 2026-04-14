@@ -41,13 +41,14 @@ pub fn mangleWith(allocator: std.mem.Allocator, src: []const u8, opts: Options) 
     const scope_of_token = try declare.collect(allocator, &tree, &gen, &name_storage, tokens, src);
     defer allocator.free(scope_of_token);
 
-    // Property pass runs on the SAME name generator so class methods
-    // share the short-name pool with locals — no wasted slots.
-    var props = if (opts.mangle_properties)
-        try properties.collect(allocator, tokens, src, &gen, &name_storage)
-    else
-        properties.PropertyMap.init(allocator);
+    // Always discover class-method declaration positions so emit can
+    // keep their names verbatim (decorator helpers reference them by
+    // string). When property mangling is enabled we ALSO assign short
+    // names; when disabled we drop the rename map but keep the decl
+    // markers so scope-mangling can't accidentally rewrite them.
+    var props = try properties.collect(allocator, tokens, src, &gen, &name_storage);
     defer props.deinit();
+    if (!opts.mangle_properties) props.map.clearRetainingCapacity();
 
     return emit.emit(allocator, &tree, &props, tokens, src, scope_of_token);
 }

@@ -1,15 +1,19 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "ES2020",
+    "module": "ESNext",
     "moduleResolution": "bundler",
+    "lib": ["DOM", "ES2020"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "removeComments": false,
-    "outDir": ".cache/ts",
-    "rootDir": "src/js"
+    "noEmit": true,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/js/*"]
+    }
   },
-  "include": ["src/js/**/*.ts"],
-  "exclude": []
+  "include": ["src/js/**/*.ts"]
 }

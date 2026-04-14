@@ -81,6 +81,11 @@ pub fn minifyJs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
                 while (j < src.len and std.ascii.isWhitespace(src[j])) : (j += 1) {}
                 if (j < src.len and needsSpace(last) and needsSpace(src[j])) {
                     try out.append(' ');
+                } else if (j < src.len and ((last == '-' and src[j] == '-') or (last == '+' and src[j] == '+'))) {
+                    // Keep a space between `-` and `--`/`-` (and `+`/`++`)
+                    // so JS's maximal-munch tokenizer doesn't misread
+                    // `1 - --x` as `1 -- -x` (postfix on a literal).
+                    try out.append(' ');
                 }
             }
             while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}

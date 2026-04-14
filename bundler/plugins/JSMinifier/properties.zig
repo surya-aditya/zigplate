@@ -134,9 +134,17 @@ fn collectMethodsInClassBody(
         // anything our reserved list protects.
         if (reserved.isReserved(ident)) continue;
         if (isPropertyBlocklisted(ident)) continue;
+
+        // ALWAYS mark the declaration site so emit() keeps the literal
+        // name verbatim — even if a previous class already declared the
+        // same method name. Otherwise scope-mangling would rename the
+        // second declaration and silently break method lookups.
+        try props.decl_tokens.put(i, {});
+
+        // Only allocate a new short name the FIRST time we see this name
+        // — same method on different classes shares one entry.
         if (props.map.contains(ident)) continue;
 
-        // Pick the next short name, avoiding a no-op rename.
         var buf: [8]u8 = undefined;
         var short = gen.next(&buf);
         while (std.mem.eql(u8, short, ident)) {
@@ -145,7 +153,6 @@ fn collectMethodsInClassBody(
         const owned = try allocator.dupe(u8, short);
         try name_storage.append(owned);
         try props.map.put(ident, owned);
-        try props.decl_tokens.put(i, {});
     }
 }
 

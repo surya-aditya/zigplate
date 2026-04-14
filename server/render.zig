@@ -3,19 +3,31 @@ const h = @import("html");
 const document = @import("document");
 const router = @import("router");
 const cms_mod = @import("cms");
+const assets = @import("assets");
 
 pub const CmsStore = cms_mod.Store;
 pub const Content = cms_mod.Content;
 
 pub const ShellCtx = struct {
     title: []const u8,
-    device: []const u8,
     content: []const u8,
+    stylesheet: []const u8,
+    script_src: []const u8,
 
     pub fn get(self: ShellCtx, key: []const u8) []const u8 {
         return h.ctxGet(self, key);
     }
 };
+
+fn shellFor(title: []const u8, device: []const u8, content: []const u8) ShellCtx {
+    const is_m = std.mem.eql(u8, device, "m");
+    return .{
+        .title = title,
+        .content = content,
+        .stylesheet = if (is_m) assets.m_css else assets.d_css,
+        .script_src = if (is_m) assets.m_js else assets.d_js,
+    };
+}
 
 // ---------------------------------------------------------------------
 // Per-device JSON cache blob, memoised on store version.
@@ -26,9 +38,23 @@ pub const Cache = struct {
     mu: std.Thread.Mutex = .{},
     entries: [2]Entry = .{ .{}, .{} },
 
+    hits: std.atomic.Value(u64) = .init(0),
+    misses: std.atomic.Value(u64) = .init(0),
+    invalidations: std.atomic.Value(u64) = .init(0),
+    last_version: std.atomic.Value(u64) = .init(0),
+
     const Entry = struct {
         version: u64 = std.math.maxInt(u64),
         blob: ?[]u8 = null,
+    };
+
+    pub const Snapshot = struct {
+        hits: u64,
+        misses: u64,
+        invalidations: u64,
+        version: u64,
+        d_bytes: u64,
+        m_bytes: u64,
     };
 
     pub fn init(gpa: std.mem.Allocator) Cache {
@@ -49,6 +75,7 @@ pub const Cache = struct {
             e.blob = null;
             e.version = std.math.maxInt(u64);
         }
+        _ = self.invalidations.fetchAdd(1, .monotonic);
     }
 
     pub fn getBlob(
@@ -63,7 +90,12 @@ pub const Cache = struct {
         defer self.mu.unlock();
 
         const e = &self.entries[slot];
-        if (e.blob) |b| if (e.version == current) return b;
+        if (e.blob) |b| if (e.version == current) {
+            _ = self.hits.fetchAdd(1, .monotonic);
+            return b;
+        };
+
+        _ = self.misses.fetchAdd(1, .monotonic);
 
         if (e.blob) |b| self.gpa.free(b);
         e.blob = null;
@@ -73,7 +105,23 @@ pub const Cache = struct {
         try renderCacheBlob(self.gpa, buf.writer(self.gpa), device, store);
         e.blob = try buf.toOwnedSlice(self.gpa);
         e.version = current;
+        self.last_version.store(current, .monotonic);
         return e.blob.?;
+    }
+
+    pub fn snapshot(self: *Cache) Snapshot {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const d_bytes: u64 = if (self.entries[0].blob) |b| b.len else 0;
+        const m_bytes: u64 = if (self.entries[1].blob) |b| b.len else 0;
+        return .{
+            .hits = self.hits.load(.monotonic),
+            .misses = self.misses.load(.monotonic),
+            .invalidations = self.invalidations.load(.monotonic),
+            .version = self.last_version.load(.monotonic),
+            .d_bytes = d_bytes,
+            .m_bytes = m_bytes,
+        };
     }
 };
 
@@ -98,12 +146,7 @@ pub fn renderDocument(
     try router.renderBody(idx, body_buf.writer(allocator), allocator, device, content);
 
     // Pass 2 — envelope around it.
-    const shell = ShellCtx{
-        .title = content.title,
-        .device = device,
-        .content = body_buf.items,
-    };
-    try h.writeTemplate(w, document.template, shell);
+    try h.writeTemplate(w, document.template, shellFor(content.title, device, body_buf.items));
 }
 
 pub fn renderCacheBlob(
@@ -114,9 +157,8 @@ pub fn renderCacheBlob(
 ) !void {
     try w.writeAll("{\"body\":\"");
     {
-        const shell = ShellCtx{ .title = "", .device = device, .content = "" };
         var esc = jsonEscaper(w);
-        try h.writeTemplate(&esc, document.empty, shell);
+        try h.writeTemplate(&esc, document.empty, shellFor("", device, ""));
     }
     try w.writeAll("\",\"cache\":{");
 

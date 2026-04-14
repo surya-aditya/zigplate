@@ -19,7 +19,6 @@ fn wrap(comptime is_desktop: bool) []const u8 {
     return PageLayout(.{
         .children = inner,
         .is_desktop = is_desktop,
-        .bg_id = "about-bg",
     });
 }
 

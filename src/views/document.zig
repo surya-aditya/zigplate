@@ -2,33 +2,30 @@ const h = @import("html");
 const Tag = h.Tag;
 const Void = h.Void;
 
+// root.css is comptime-inlined as a <style> block so first paint is
+// one round-trip. Per-device sheets still ship as links.
+const root_css = @embedFile("root_css");
+
 // The site-wide HTML envelope. `{{!content}}` is the rendered page
 // body; `{{title}}` and `{{device}}` are resolved against the shell
 // ctx built in server/render.zig.
 
-const head_block: []const u8 = Tag("head", "",
-    Void("meta", "[charset=utf-8]") ++
+const head_block: []const u8 = Tag("head", "", Void("meta", "[charset=utf-8]") ++
     Void("meta", "[name=viewport][content=width=device-width, initial-scale=1]") ++
     Tag("title", "", "{{title}} · zigplate") ++
-    Void("link", "[rel=stylesheet][href=/app.css]")
-);
+    Tag("style", "", root_css) ++
+    Void("link", "[rel=stylesheet][href={{!stylesheet}}]"));
 
 const chrome_block: []const u8 =
-    Tag("nav", "#n",
-        Tag("a", "#n-li-0[href=/]", "Home") ++
-        Tag("a", "#n-li-1[href=/about]", "About")
-    ) ++
+    Tag("nav", "#n", Tag("a", "#n-li-0[href=/]", "Home") ++
+        Tag("a", "#n-li-1[href=/about]", "About")) ++
     Tag("div", "#lo", Tag("div", "#lo-bg", "")) ++
-    Tag("script", "[src=/{{device}}.js]", "");
+    Tag("script", "[src={{!script_src}}]", "");
 
-pub const template: []const u8 = "<!doctype html>" ++ Tag("html", "[lang=en]",
-    head_block ++
-    Tag("body", "", Tag("main", "#m", "{{!content}}") ++ chrome_block)
-);
+pub const template: []const u8 = "<!doctype html>" ++ Tag("html", "[lang=en]", head_block ++
+    Tag("body", "", Tag("main", "#m", "{{!content}}") ++ chrome_block));
 
 // Same envelope with an empty <main> — returned as the cache blob's
 // `body` so the SPA has device-correct chrome to hydrate into.
-pub const empty: []const u8 = "<!doctype html>" ++ Tag("html", "[lang=en]",
-    head_block ++
-    Tag("body", "", Tag("main", "#m", "") ++ chrome_block)
-);
+pub const empty: []const u8 = "<!doctype html>" ++ Tag("html", "[lang=en]", head_block ++
+    Tag("body", "", Tag("main", "#m", "") ++ chrome_block));

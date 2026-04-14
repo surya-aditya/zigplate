@@ -49,10 +49,28 @@ pub fn main() !void {
     const compressed: f64 = @floatFromInt(mangled.len);
     const savings = if (input.len > 0) (1.0 - compressed / original) * 100.0 else 0.0;
 
-    std.debug.print(
-        "\x1b[33m  JS  \x1b[0m {s} \x1b[2m→\x1b[0m {s}\n" ++
-            "       \x1b[36m{d}\x1b[0m bytes \x1b[2m→\x1b[0m \x1b[1m\x1b[36m{d}\x1b[0m bytes " ++
-            "\x1b[2m(\x1b[0m\x1b[32m-{d:.1}%\x1b[0m\x1b[2m)\x1b[0m\n",
-        .{ args[1], args[2], input.len, mangled.len, savings },
-    );
+    appendStats(allocator, "JS", args[1], args[2], input.len, mangled.len) catch {
+        std.debug.print(
+            "\x1b[43;30m JS   \x1b[0m  {s} \x1b[2m→\x1b[0m {s}  {d} \x1b[2m→\x1b[0m {d} b  (-{d:.1}%)\n",
+            .{ args[1], args[2], input.len, mangled.len, savings },
+        );
+    };
+}
+
+fn appendStats(
+    a: std.mem.Allocator,
+    kind: []const u8,
+    src: []const u8,
+    dst: []const u8,
+    n_in: u64,
+    n_out: u64,
+) !void {
+    const log_path = std.process.getEnvVarOwned(a, "BUNDLE_STATS_LOG") catch return error.NoStatsLog;
+    defer a.free(log_path);
+    var file = try std.fs.cwd().createFile(log_path, .{ .truncate = false });
+    defer file.close();
+    try file.seekFromEnd(0);
+    var buf: [512]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "{s}|{s}|{s}|{d}|{d}\n", .{ kind, src, dst, n_in, n_out });
+    try file.writeAll(line);
 }

@@ -1,26 +1,16 @@
 const std = @import("std");
 
 // ---------------------------------------------------------------------
-// CMS store — in-memory snapshot of the content that drives every page.
+// CMS store — in-memory snapshot of every route's content.
 //
-// The shape here is deliberately generic: `fields` is a flat string map
-// so adding a new CMS field doesn't require touching the store. Page
-// render functions look up the keys they care about via `get`.
-//
-// Source-of-truth flow (once a real CMS is wired in):
-//
-//   1. Server boot → `Store.init` → `Store.seed` fills defaults.
-//   2. CMS fetch adapter (Sanity / Prismic / custom) calls
-//      `Store.replace(route, Content)` under the write lock.
-//   3. `POST /_cms/invalidate` bumps `version` so the render cache
-//      knows to regenerate on the next request.
+// Each entry owns its own strings (title, field keys, field values),
+// allocated through the store's backing allocator. `replace` frees the
+// previous entry's strings before installing the new one — so repeated
+// CMS updates for the same route don't grow memory indefinitely.
 // ---------------------------------------------------------------------
 
 pub const Content = struct {
     title: []const u8,
-    // Flat `key -> value` map; owners of the values are tracked by
-    // `Store` via `arena`. Keys are the same across pages (e.g.
-    // "heading", "body") so templates stay simple.
     fields: std.StringHashMapUnmanaged([]const u8) = .{},
 
     pub fn get(self: Content, key: []const u8) []const u8 {
@@ -30,31 +20,20 @@ pub const Content = struct {
 
 pub const Store = struct {
     gpa: std.mem.Allocator,
-    // All content strings are owned by this arena so replacing a route
-    // is a matter of resetting the per-route sub-arena.
-    arena: std.heap.ArenaAllocator,
     mu: std.Thread.RwLock = .{},
     entries: std.StringHashMapUnmanaged(Content) = .{},
-    // Monotonic — incremented on every mutation so caches can detect
-    // staleness without comparing content.
     version: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Store {
-        return .{
-            .gpa = gpa,
-            .arena = std.heap.ArenaAllocator.init(gpa),
-        };
+        return .{ .gpa = gpa };
     }
 
     pub fn deinit(self: *Store) void {
-        self.entries.deinit(self.gpa);
-        self.arena.deinit();
+        self.mu.lock();
+        defer self.mu.unlock();
+        freeAllEntries(self.gpa, &self.entries);
     }
 
-    // Read snapshot. Caller must not hold the returned slices past the
-    // next `replace` / `seed` / `clear` — but since those only fire on
-    // CMS updates behind a write lock and we render atomically per
-    // request, that's fine for our single-request rendering model.
     pub fn get(self: *Store, route: []const u8) ?Content {
         self.mu.lockShared();
         defer self.mu.unlockShared();
@@ -67,28 +46,34 @@ pub const Store = struct {
         return self.version;
     }
 
-    // Replace the entry for `route` with `content`. Strings in `content`
-    // are copied into the store's arena so the caller can free its
-    // temporaries immediately after.
+    pub fn entriesCount(self: *Store) usize {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        return self.entries.count();
+    }
+
+    // Replace the entry for `route`. `content`'s strings are duplicated
+    // into the store; the previous entry (if any) is freed.
     pub fn replace(self: *Store, route: []const u8, content: Content) !void {
+        var cloned = try cloneContent(self.gpa, content);
+        errdefer freeContent(self.gpa, &cloned);
+
         self.mu.lock();
         defer self.mu.unlock();
 
-        const a = self.arena.allocator();
-        const owned_route = try a.dupe(u8, route);
-        var owned = Content{ .title = try a.dupe(u8, content.title) };
-
-        var it = content.fields.iterator();
-        while (it.next()) |e| {
-            try owned.fields.put(a, try a.dupe(u8, e.key_ptr.*), try a.dupe(u8, e.value_ptr.*));
+        const gop = try self.entries.getOrPut(self.gpa, route);
+        if (gop.found_existing) {
+            freeContent(self.gpa, gop.value_ptr);
+        } else {
+            const owned_key = try self.gpa.dupe(u8, route);
+            // Overwrite the hashmap's non-owning key with our duplicate so
+            // the store no longer borrows the caller's `route` slice.
+            gop.key_ptr.* = owned_key;
         }
-
-        try self.entries.put(self.gpa, owned_route, owned);
+        gop.value_ptr.* = cloned;
         self.version +%= 1;
     }
 
-    // Seed with defaults so the server can render before the real CMS
-    // adapter reports in.
     pub fn seed(self: *Store) !void {
         {
             var c = Content{ .title = "Home" };
@@ -106,12 +91,45 @@ pub const Store = struct {
         }
     }
 
-    // Discard everything and bump the version so caches rebuild.
     pub fn clear(self: *Store) void {
         self.mu.lock();
         defer self.mu.unlock();
-        self.entries.clearRetainingCapacity();
-        _ = self.arena.reset(.retain_capacity);
+        freeAllEntries(self.gpa, &self.entries);
         self.version +%= 1;
     }
 };
+
+fn cloneContent(gpa: std.mem.Allocator, src: Content) !Content {
+    var cloned = Content{ .title = try gpa.dupe(u8, src.title) };
+    errdefer freeContent(gpa, &cloned);
+
+    var it = src.fields.iterator();
+    while (it.next()) |e| {
+        const k = try gpa.dupe(u8, e.key_ptr.*);
+        errdefer gpa.free(k);
+        const v = try gpa.dupe(u8, e.value_ptr.*);
+        errdefer gpa.free(v);
+        try cloned.fields.put(gpa, k, v);
+    }
+    return cloned;
+}
+
+fn freeContent(gpa: std.mem.Allocator, c: *Content) void {
+    var it = c.fields.iterator();
+    while (it.next()) |e| {
+        gpa.free(@constCast(e.key_ptr.*));
+        gpa.free(@constCast(e.value_ptr.*));
+    }
+    c.fields.deinit(gpa);
+    gpa.free(@constCast(c.title));
+    c.* = .{ .title = "" };
+}
+
+fn freeAllEntries(gpa: std.mem.Allocator, entries: *std.StringHashMapUnmanaged(Content)) void {
+    var it = entries.iterator();
+    while (it.next()) |e| {
+        gpa.free(@constCast(e.key_ptr.*));
+        freeContent(gpa, e.value_ptr);
+    }
+    entries.clearRetainingCapacity();
+}

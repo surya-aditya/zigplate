@@ -92,22 +92,10 @@ pub fn handle(
         return;
     }
 
-    // `?d=<device>` — client bootstrap; returns the full route cache.
-    if (queryDevice(query)) |dev| {
-        const blob = ctx.cache.getBlob(dev, ctx.store) catch |err| {
-            try req.respond("cache error", .{ .status = .internal_server_error });
-            ctx.stats.recordResponse(.internal_server_error, .cache_blob, 0);
-            log.internalError(raw_path, err);
-            return;
-        };
-        try req.respond(blob, .{
-            .status = .ok,
-            .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
-        });
-        ctx.stats.recordResponse(.ok, .cache_blob, blob.len);
-        log.ok(dev, "cache", blob.len, "");
-        return;
-    }
+    // The per-device cache blob is now prerendered to `public/<dev>.json`
+    // at build time and served by the static-asset path below. No
+    // dynamic `?d=X` handling needed.
+    _ = query;
 
     // HTML routes → SSR.
     if (isPageRoute(raw_path)) {
@@ -250,19 +238,6 @@ fn normalizePath(path: []const u8) []const u8 {
     return path;
 }
 
-fn queryDevice(query: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeScalar(u8, query, '&');
-    while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-        const key = pair[0..eq];
-        const val = pair[eq + 1 ..];
-        if (std.mem.eql(u8, key, "d")) {
-            if (std.mem.eql(u8, val, "d")) return "d";
-            if (std.mem.eql(u8, val, "m")) return "m";
-        }
-    }
-    return null;
-}
 
 fn detectDevice(req: *std.http.Server.Request) []const u8 {
     var it = req.iterateHeaders();

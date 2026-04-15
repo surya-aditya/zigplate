@@ -186,7 +186,7 @@ export default class Controller {
 		};
 
 		Fetch<CacheBlob>({
-			url: __.rt.cur.url + "?d=" + this.d,
+			url: "/" + this.d + ".json",
 			type: "json",
 			success: (blob) => {
 				__.rts = { ...__.rts, ...blob.routes };

@@ -130,6 +130,27 @@ fn collectMethodsInClassBody(
         const paren = nextNonWhitespace(tokens, i + 1);
         if (paren >= tokens.len or tokens[paren].kind != .symbol or src[tokens[paren].start] != '(') continue;
 
+        // Method declarations sit at "statement position" inside the
+        // class body — the previous non-whitespace token must be `{`
+        // (class body open), `}` (prev method close), `;` (prev field
+        // terminator), or a method modifier (`static`/`get`/…). If it's
+        // anything else (e.g. `new`, `=`, `(`, `,`), the `ident(` is
+        // part of a call expression, not a method declaration.
+        if (i > open_brace + 1) {
+            var p: usize = i - 1;
+            while (p > open_brace and tokens[p].kind == .whitespace) : (p -= 1) {}
+            const prev = tokens[p];
+            if (prev.kind == .symbol) {
+                const pc = src[prev.start];
+                if (pc != '{' and pc != '}' and pc != ';') continue;
+            } else if (prev.kind == .identifier) {
+                const ptext = src[prev.start..prev.end];
+                if (!isMethodModifier(ptext)) continue;
+            } else {
+                continue;
+            }
+        }
+
         // Don't touch names that JS semantics pin (`constructor`, …) or
         // anything our reserved list protects.
         if (reserved.isReserved(ident)) continue;

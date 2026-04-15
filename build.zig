@@ -29,6 +29,10 @@ pub fn build(b: *std.Build) void {
     const asset_hash = host.exe("asset-hash", "bundler/plugins/AssetHash/main.zig");
     const bundle_report = host.exe("bundle-report", "bundler/plugins/BundleReport/main.zig");
 
+    // TSBundle: Zig-only TypeScript → bundled JS. Links vendored
+    // tree-sitter + tree-sitter-typescript (MIT, ~2 MB of C source).
+    const ts_bundle = buildTsBundle(b, host.target);
+
     // Shared stats log — each minifier + the hasher append one CSV line;
     // bundle-report renders the final unified table.
     const stats_log = ".cache/bundle-stats.log";
@@ -128,18 +132,18 @@ pub fn build(b: *std.Build) void {
         const intermediate = b.fmt(".cache/ts/{s}.js", .{name});
         const final = b.fmt("public/{s}.js", .{name});
 
-        const bun = b.addSystemCommand(&.{
-            "bun",        "build",    entry,     "--outfile",
-            intermediate, "--target", "browser", "--format=iife",
-        });
-        bun.setCwd(b.path("."));
+        // ts-bundle: strip TS + resolve imports + wrap in IIFE.
+        const tsb = b.addRunArtifact(ts_bundle);
+        tsb.setCwd(b.path("."));
+        tsb.has_side_effects = true;
+        tsb.addArgs(&.{ entry, intermediate });
 
         const min = b.addRunArtifact(js_minifier);
         min.setCwd(b.path("."));
         min.setEnvironmentVariable("BUNDLE_STATS_LOG", stats_log);
         min.has_side_effects = true;
         min.addArgs(&.{ intermediate, final });
-        min.step.dependOn(&bun.step);
+        min.step.dependOn(&tsb.step);
         min.step.dependOn(&clear_stats.step);
         bundle_step.dependOn(&min.step);
         hash_run.step.dependOn(&min.step);
@@ -163,6 +167,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     server.addImport("assets", assets);
+
+    // Prerender per-device cache JSON to public/<dev>.json. The server
+    // itself runs the render code in `--prerender` mode, so the bundle
+    // step bakes the SPA bootstrap payload as a static file —
+    // `/d.json` and `/m.json` are then served by the regular static
+    // path with no per-request rendering cost.
+    const prerender = b.addRunArtifact(exe);
+    prerender.setCwd(b.path("."));
+    prerender.has_side_effects = true;
+    prerender.addArgs(&.{ "--prerender", "public" });
+    prerender.step.dependOn(b.getInstallStep());
+    bundle_step.dependOn(&prerender.step);
 
     // `serve` = bundle everything, then run.
     run_cmd.step.dependOn(bundle_step);
@@ -249,4 +265,42 @@ const HostTools = struct {
 fn addTest(b: *std.Build, step: *std.Build.Step, m: *std.Build.Module) void {
     const t = b.addTest(.{ .root_module = m });
     step.dependOn(&b.addRunArtifact(t).step);
+}
+
+// Build the ts-bundle host exe. Tree-sitter + grammar are pulled in
+// through Zig's package manager (build.zig.zon → ~/.cache/zig/p/), so
+// nothing's vendored in the repo.
+fn buildTsBundle(b: *std.Build, host_target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
+    const ts_dep = b.dependency("tree_sitter", .{});
+    const ts_ts_dep = b.dependency("tree_sitter_typescript", .{});
+
+    const mod = b.createModule(.{
+        .root_source_file = b.path("bundler/plugins/TSBundle/main.zig"),
+        .target = host_target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+
+    // Keep warnings quiet; the grammar's generated parser is huge and
+    // we don't want to maintain a patch on it.
+    const cflags = [_][]const u8{
+        "-std=c11",
+        "-fPIC",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-but-set-variable",
+    };
+
+    // tree-sitter core (amalgamated lib.c pulls in every other .c).
+    mod.addCSourceFile(.{ .file = ts_dep.path("lib/src/lib.c"), .flags = &cflags });
+    mod.addIncludePath(ts_dep.path("lib/include"));
+    mod.addIncludePath(ts_dep.path("lib/src"));
+
+    // tree-sitter-typescript grammar.
+    mod.addCSourceFile(.{ .file = ts_ts_dep.path("typescript/src/parser.c"), .flags = &cflags });
+    mod.addCSourceFile(.{ .file = ts_ts_dep.path("typescript/src/scanner.c"), .flags = &cflags });
+    mod.addIncludePath(ts_ts_dep.path("typescript/src"));
+    mod.addIncludePath(ts_ts_dep.path("common"));
+
+    return b.addExecutable(.{ .name = "ts-bundle", .root_module = mod });
 }

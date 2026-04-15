@@ -118,6 +118,7 @@ pub fn handle(
                 return;
             },
         };
+
         const render_ns: u64 = @intCast(std.time.nanoTimestamp() - render_start);
         ctx.stats.recordRender(render_ns);
 
@@ -166,6 +167,7 @@ pub fn handle(
             .{ .name = "cache-control", .value = cc },
         },
     });
+
     ctx.stats.recordResponse(.ok, .static_asset, stat.size);
     log.ok(device, raw_path, stat.size, "");
 }
@@ -187,6 +189,7 @@ fn maybePrintStats(ctx: Ctx) void {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
     const user_ms = @as(i64, ru.utime.sec) * 1000 + @divFloor(ru.utime.usec, 1000);
     const sys_ms = @as(i64, ru.stime.sec) * 1000 + @divFloor(ru.stime.usec, 1000);
+
     log.statsLine(total, errs, max_ns, hit_pct, stats_mod.rssBytes(ru), user_ms, sys_ms);
 }
 
@@ -197,6 +200,7 @@ fn handleStats(
 ) !void {
     // Arena-backed; freed when the parent request's arena deinits.
     var buf: std.ArrayList(u8) = .empty;
+
     try ctx.stats.writeJson(buf.writer(allocator), ctx.store, ctx.cache);
     try req.respond(buf.items, .{
         .status = .ok,
@@ -216,9 +220,12 @@ fn isHashedAsset(path: []const u8) bool {
     const last = std.mem.lastIndexOfScalar(u8, basename, '.') orelse return false;
     const penult = std.mem.lastIndexOfScalar(u8, basename[0..last], '.') orelse return false;
     const hash = basename[penult + 1 .. last];
+
     if (hash.len != 16) return false;
+
     for (hash) |c| {
         const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+
         if (!ok) return false;
     }
     return true;
@@ -237,7 +244,6 @@ fn normalizePath(path: []const u8) []const u8 {
     if (path.len > 1 and path[path.len - 1] == '/') return path[0 .. path.len - 1];
     return path;
 }
-
 
 fn detectDevice(req: *std.http.Server.Request) []const u8 {
     var it = req.iterateHeaders();
